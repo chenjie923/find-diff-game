@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>大家来找茬 自动检测面板</title>
+<title>大家来找茬 - 特征配准+自动对齐版本</title>
+<script src="https://cdn.jsdelivr.net/npm/opencv-js@4.8.0/dist/opencv.min.js"></script>
 <style>
 *{box-sizing:border-box;font-family:"Microsoft Yahei",sans-serif;}
 body{background:#f4f7fa;padding:20px;max-width:1200px;margin:0 auto;}
@@ -25,15 +26,15 @@ canvas{border:1px solid #ddd;border-radius:8px;max-width:100%;}
 </style>
 </head>
 <body>
-<h1>大家来找茬｜自动找不同检测面板</h1>
+<h1>大家来找茬｜ORB特征配准 + 像素对齐检测</h1>
 <div class="panel">
     <div class="row">
         <div class="upload-box">
-            <label>图片A（第一张）</label>
+            <label>参考图A（基准图）</label>
             <input type="file" id="img1Input" accept="image/*">
         </div>
         <div class="upload-box">
-            <label>图片B（第二张）</label>
+            <label>待对齐图B（会自动对齐到A）</label>
             <input type="file" id="img2Input" accept="image/*">
         </div>
     </div>
@@ -43,33 +44,35 @@ canvas{border:1px solid #ddd;border-radius:8px;max-width:100%;}
             <input type="range" id="thresh" min="5" max="100" value="30">
         </div>
         <div class="param-item">
-            <label>最小区域像素：<span id="areaVal">80</span></label>
+            <label>最小轮廓面积：<span id="areaVal">80</span></label>
             <input type="range" id="minArea" min="10" max="400" value="80">
         </div>
     </div>
     <div class="btns">
-        <button id="runBtn">开始找不同</button>
+        <button id="runBtn">对齐并检测差异</button>
         <button id="reset">重置</button>
     </div>
     <div class="info">检测结果：<span id="resultText">等待运行</span></div>
-    <div id="log">系统日志：就绪，上传图片即可检测</div>
+    <div id="log">系统日志：等待OpenCV加载</div>
     <div class="canvas-wrap">
         <div>
-            <p>原图A</p>
+            <p>原图A（基准）</p>
             <canvas id="c1"></canvas>
         </div>
         <div>
-            <p>原图B</p>
+            <p>原图B（原始）</p>
             <canvas id="c2"></canvas>
         </div>
         <div>
-            <p>标注结果图（红框=差异）</p>
+            <p>B对齐后 + 差异红框</p>
             <canvas id="cOut"></canvas>
         </div>
     </div>
 </div>
 
 <script>
+let cvReady = false;
+let img1 = null, img2 = null;
 const $ = s=>document.querySelector(s);
 const logDom = $("#log");
 const resultText = $("#resultText");
@@ -85,10 +88,13 @@ $("#areaVal").innerText = areaSlider.value;
 threshSlider.oninput = ()=>$("#threshVal").innerText = threshSlider.value;
 areaSlider.oninput = ()=>$("#areaVal").innerText = areaSlider.value;
 
-let img1 = null, img2 = null;
-
 function log(msg){
     logDom.innerText = "系统日志："+msg;
+}
+
+cv['onRuntimeInitialized'] = ()=>{
+    cvReady = true;
+    log("✅ OpenCV加载完成，可以上传图片");
 }
 
 $("#img1Input").onchange = async e=>{
@@ -113,14 +119,6 @@ function drawImg(img,canvas){
     canvas.getContext('2d').drawImage(img,0,0);
 }
 
-$("#runBtn").onclick = ()=>{
-    if(!img1 || !img2){
-        log("❌ 请先上传两张找茬图片");
-        return;
-    }
-    runDetect();
-}
-
 $("#reset").onclick = ()=>{
     img1=null;img2=null;
     ctx1.clearRect(0,0,c1.width,c1.height);
@@ -130,96 +128,113 @@ $("#reset").onclick = ()=>{
     log("已重置");
 }
 
-// 灰度计算
-function getGray(r,g,b){
-    return 0.299*r + 0.587*g + 0.114*b;
+$("#runBtn").onclick = ()=>{
+    if(!cvReady){
+        log("❌ OpenCV还未加载完成，请等待");
+        return;
+    }
+    if(!img1 || !img2){
+        log("❌ 请上传两张图片");
+        return;
+    }
+    runRegisterAndDetect();
 }
 
-function runDetect(){
-    log("🔍 开始执行找不同算法...");
+// 核心：ORB配准 + 单应变换对齐 + 差分检测
+function runRegisterAndDetect(){
+    log("🔍 开始ORB特征提取、图像配准对齐...");
     const threshVal = Number(threshSlider.value);
     const minAreaVal = Number(areaSlider.value);
 
-    // 统一尺寸，以第一张图为准
-    const w = img1.width;
-    const h = img1.height;
-    c2.width = w; c2.height = h;
-    ctx2.drawImage(img2,0,0,w,h);
+    // 从canvas读取Mat
+    const matA = cv.imread(c1);
+    const matB = cv.imread(c2);
+    const grayA = new cv.Mat();
+    const grayB = new cv.Mat();
+    cv.cvtColor(matA, grayA, cv.COLOR_RGBA2GRAY);
+    cv.cvtColor(matB, grayB, cv.COLOR_RGBA2GRAY);
 
-    // 获取像素数据
-    const data1 = ctx1.getImageData(0,0,w,h);
-    const data2 = ctx2.getImageData(0,0,w,h);
-    const outData = ctx1.getImageData(0,0,w,h);
+    // ORB检测器
+    const orb = new cv.ORB(500);
+    const kpA = new cv.KeyPointVector();
+    const kpB = new cv.KeyPointVector();
+    const desA = new cv.Mat();
+    const desB = new cv.Mat();
+    orb.detectAndCompute(grayA, new cv.Mat(), kpA, desA);
+    orb.detectAndCompute(grayB, new cv.Mat(), kpB, desB);
 
-    // 标记差异掩码
-    const mask = new Uint8Array(w*h);
-    for(let y=0;y<h;y++){
-        for(let x=0;x<w;x++){
-            const idx = (y*w + x)*4;
-            const g1 = getGray(data1.data[idx],data1.data[idx+1],data1.data[idx+2]);
-            const g2 = getGray(data2.data[idx],data2.data[idx+1],data2.data[idx+2]);
-            const diff = Math.abs(g1-g2);
-            if(diff > threshVal){
-                mask[y*w+x] = 255;
-            }else{
-                mask[y*w+x] = 0;
-            }
+    // BFMatcher匹配
+    const bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+    const matches = new cv.DMatchVector();
+    bf.match(desA, desB, matches);
+
+    if(matches.size() < 10){
+        log("⚠️ 特征匹配点太少，对齐失败！两张图差异过大/无共同特征");
+        matA.delete();matB.delete();grayA.delete();grayB.delete();
+        orb.delete();bf.delete();desA.delete();desB.delete();
+        kpA.delete();kpB.delete();matches.delete();
+        return;
+    }
+
+    // 提取匹配点，计算单应矩阵H
+    const srcPts = [];
+    const dstPts = [];
+    for(let i=0;i<matches.size();i++){
+        const m = matches.get(i);
+        const ptA = kpA.get(m.queryIdx).pt;
+        const ptB = kpB.get(m.trainIdx).pt;
+        srcPts.push(ptB.x, ptB.y);
+        dstPts.push(ptA.x, ptA.y);
+    }
+    const srcMat = cv.matFromArray(srcPts.length/2, 1, cv.CV_32FC2, srcPts);
+    const dstMat = cv.matFromArray(dstPts.length/2, 1, cv.CV_32FC2, dstPts);
+    const H = cv.findHomography(srcMat, dstMat, cv.RANSAC, 5.0);
+
+    // 透视变换：把B对齐到A的尺寸和坐标
+    const alignedB = new cv.Mat();
+    cv.warpPerspective(matB, alignedB, H, new cv.Size(matA.cols, matA.rows));
+
+    // 灰度差分
+    const grayAlignedB = new cv.Mat();
+    cv.cvtColor(alignedB, grayAlignedB, cv.COLOR_RGBA2GRAY);
+    const diff = new cv.Mat();
+    cv.absdiff(grayA, grayAlignedB, diff);
+    const bin = new cv.Mat();
+    cv.threshold(diff, bin, threshVal, 255, cv.THRESH_BINARY);
+
+    // 轮廓查找
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    // 在对齐后的图上绘制红框
+    const outMat = alignedB.clone();
+    let count = 0;
+    for(let i=0;i<contours.size();i++){
+        const cnt = contours.get(i);
+        const area = cv.contourArea(cnt);
+        if(area > minAreaVal){
+            count++;
+            const rect = cv.boundingRect(cnt);
+            cv.rectangle(outMat, new cv.Point(rect.x,rect.y), new cv.Point(rect.x+rect.width,rect.y+rect.height), [255,0,0,255],2);
         }
     }
 
-    // 连通域查找（8邻域）
-    const visited = new Uint8Array(w*h);
-    const boxes = [];
-    for(let y=0;y<h;y++){
-        for(let x=0;x<w;x++){
-            const pos = y*w+x;
-            if(mask[pos]===255 && visited[pos]===0){
-                // BFS
-                let q = [[x,y]];
-                visited[pos]=1;
-                let minX=x,maxX=x,minY=y,maxY=y,cnt=0;
-                while(q.length>0){
-                    const [cx,cy] = q.shift();
-                    cnt++;
-                    minX = Math.min(minX,cx);
-                    maxX = Math.max(maxX,cx);
-                    minY = Math.min(minY,cy);
-                    maxY = Math.max(maxY,cy);
-                    // 8邻域
-                    for(let dy=-1;dy<=1;dy++){
-                        for(let dx=-1;dx<=1;dx++){
-                            if(dx===0&&dy===0) continue;
-                            const nx = cx+dx;
-                            const ny = cy+dy;
-                            if(nx>=0&&nx<w&&ny>=0&&ny<h){
-                                const npos = ny*w + nx;
-                                if(mask[npos]===255 && visited[npos]===0){
-                                    visited[npos]=1;
-                                    q.push([nx,ny]);
-                                }
-                            }
-                        }
-                    }
-                }
-                if(cnt >= minAreaVal){
-                    boxes.push({x:minX,y:minY,w:maxX-minX+1,h:maxY-minY+1});
-                }
-            }
-        }
-    }
+    // 输出到canvas
+    cOut.width = outMat.cols;
+    cOut.height = outMat.rows;
+    cv.imshow(cOut, outMat);
 
-    // 绘制结果
-    cOut.width = w;
-    cOut.height = h;
-    ctxOut.putImageData(outData,0,0);
-    ctxOut.strokeStyle="#ff0000";
-    ctxOut.lineWidth=2;
-    boxes.forEach(box=>{
-        ctxOut.strokeRect(box.x,box.y,box.w,box.h);
-    })
+    resultText.innerText = `一共找到 ${count} 处差异`;
+    log("✅ 对齐完成，差异检测结束");
 
-    resultText.innerText = `一共找到 ${boxes.length} 处差异`;
-    log(`✅ 检测完成，差异数量：${boxes.length}`);
+    // 释放内存，防止页面卡顿
+    matA.delete();matB.delete();grayA.delete();grayB.delete();
+    alignedB.delete();grayAlignedB.delete();diff.delete();bin.delete();
+    srcMat.delete();dstMat.delete();H.delete();outMat.delete();
+    orb.delete();bf.delete();desA.delete();desB.delete();
+    kpA.delete();kpB.delete();matches.delete();
+    contours.delete();hierarchy.delete();
 }
 </script>
 </body>
