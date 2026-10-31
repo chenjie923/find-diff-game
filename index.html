@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>大家来找茬 自动检测面板</title>
-<script src="https://docs.opencv.org/4.x/opencv.js"></script>
+<!-- 固定使用jsdelivr镜像，避开opencv官方跨域拦截 -->
+<script src="https://cdn.jsdelivr.net/npm/opencv-js@4.6.0/dist/opencv.min.js"></script>
 <style>
 *{box-sizing:border-box;font-family:"Microsoft Yahei",sans-serif;}
 body{background:#f4f7fa;padding:20px;max-width:1200px;margin:0 auto;}
@@ -34,6 +35,7 @@ canvas{border:1px solid #ddd;border-radius:8px;max-width:100%;}
             <input type="file" id="img1Input" accept="image/*">
         </div>
         <div class="upload-box">
+            <div class="upload-box">
             <label>图片B（第二张）</label>
             <input type="file" id="img2Input" accept="image/*">
         </div>
@@ -79,7 +81,7 @@ let cvReady = false;
 let img1 = null, img2 = null;
 let mat1, mat2;
 
-// OpenCV加载完成
+// jsdelivr版本的opencv-js，onRuntimeInitialized同样生效
 cv['onRuntimeInitialized'] = ()=>{
     cvReady = true;
     log("✅ OpenCV.js 加载完成，可以上传图片开始检测");
