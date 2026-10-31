@@ -14,14 +14,22 @@ h1{text-align:center;color:#2c3e50;}
 input[type="file"]{width:100%;padding:8px;}
 .param-item{flex:1;min-width:220px;}
 label{display:block;margin-bottom:4px;color:#34495e;font-weight:500;}
-input[type="range"]{width:100%;}
-.btns{display:flex;gap:12px;margin:16px 0;}
+input[type="range"],select{width:100%;padding:4px;}
+.btns{display:flex;gap:12px;margin:16px 0;flex-wrap:wrap;}
 button{padding:10px 24px;border:none;border-radius:8px;background:#2980b9;color:white;font-size:16px;cursor:pointer;}
 button#reset{background:#7f8c8d;}
+button#downloadBtn{background:#27ae60;}
 #log{background:#1f2937;color:#39ff14;padding:12px;border-radius:8px;min-height:80px;white-space:pre-wrap;}
 .canvas-wrap{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;}
+.canvas-item{flex:1;min-width:240px;}
 canvas{border:1px solid #ddd;border-radius:8px;max-width:100%;}
 .info{color:#c0392b;font-weight:bold;font-size:18px;}
+.setting-row{
+    display:grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px,1fr));
+    gap:12px;
+    margin:10px 0;
+}
 </style>
 </head>
 <body>
@@ -37,7 +45,8 @@ canvas{border:1px solid #ddd;border-radius:8px;max-width:100%;}
             <input type="file" id="img2Input" accept="image/*">
         </div>
     </div>
-    <div class="row">
+
+    <div class="setting-row">
         <div class="param-item">
             <label>差分阈值：<span id="threshVal">30</span></label>
             <input type="range" id="thresh" min="5" max="100" value="30">
@@ -46,25 +55,59 @@ canvas{border:1px solid #ddd;border-radius:8px;max-width:100%;}
             <label>最小区域像素：<span id="areaVal">80</span></label>
             <input type="range" id="minArea" min="10" max="400" value="80">
         </div>
+        <div class="param-item">
+            <label>连通域邻域</label>
+            <select id="neighborSel">
+                <option value="8">8邻域</option>
+                <option value="4">4邻域</option>
+            </select>
+        </div>
+        <div class="param-item">
+            <label>差分模式</label>
+            <select id="diffMode">
+                <option value="gray">灰度差分</option>
+                <option value="color">彩色RGB差分</option>
+            </select>
+        </div>
+        <div class="param-item">
+            <label>显示模式</label>
+            <select id="renderMode">
+                <option value="box">红框标注</option>
+                <option value="mask">差异像素涂色</option>
+                <option value="diff">差分灰度图</option>
+            </select>
+        </div>
+        <div class="param-item">
+            <label>预处理模糊半径：<span id="blurVal">0</span></label>
+            <input type="range" id="blurRadius" min="0" max="4" value="0">
+        </div>
     </div>
+
     <div class="btns">
         <button id="runBtn">开始找不同</button>
         <button id="reset">重置</button>
+        <button id="downloadBtn">下载结果图</button>
     </div>
+
     <div class="info">检测结果：<span id="resultText">等待运行</span></div>
     <div id="log">系统日志：就绪，上传图片即可检测</div>
+
     <div class="canvas-wrap">
-        <div>
+        <div class="canvas-item">
             <p>原图A</p>
             <canvas id="c1"></canvas>
         </div>
-        <div>
+        <div class="canvas-item">
             <p>原图B</p>
             <canvas id="c2"></canvas>
         </div>
-        <div>
-            <p>标注结果图（红框=差异）</p>
+        <div class="canvas-item">
+            <p>标注结果图</p>
             <canvas id="cOut"></canvas>
+        </div>
+        <div class="canvas-item">
+            <p>差分掩码预览</p>
+            <canvas id="cMask"></canvas>
         </div>
     </div>
 </div>
@@ -73,33 +116,36 @@ canvas{border:1px solid #ddd;border-radius:8px;max-width:100%;}
 const $ = s=>document.querySelector(s);
 const logDom = $("#log");
 const resultText = $("#resultText");
-const c1 = $("#c1"), c2 = $("#c2"), cOut = $("#cOut");
+const c1 = $("#c1"), c2 = $("#c2"), cOut = $("#cOut"), cMask = $("#cMask");
 const ctx1 = c1.getContext('2d');
 const ctx2 = c2.getContext('2d');
 const ctxOut = cOut.getContext('2d');
+const ctxMask = cMask.getContext('2d');
 
 const threshSlider = $("#thresh");
 const areaSlider = $("#minArea");
+const blurSlider = $("#blurRadius");
+const neighborSel = $("#neighborSel");
+const diffModeSel = $("#diffMode");
+const renderModeSel = $("#renderMode");
+const runBtn = $("#runBtn");
+const resetBtn = $("#reset");
+const downloadBtn = $("#downloadBtn");
+
 $("#threshVal").innerText = threshSlider.value;
 $("#areaVal").innerText = areaSlider.value;
+$("#blurVal").innerText = blurSlider.value;
+
 threshSlider.oninput = ()=>$("#threshVal").innerText = threshSlider.value;
 areaSlider.oninput = ()=>$("#areaVal").innerText = areaSlider.value;
+blurSlider.oninput = ()=>$("#blurVal").innerText = blurSlider.value;
 
 let img1 = null, img2 = null;
+let lastBoxes = [];
 
 function log(msg){
     logDom.innerText = "系统日志："+msg;
 }
-
-$("#img1Input").onchange = async e=>{
-    img1 = await loadImg(e.target.files[0]);
-    drawImg(img1,c1);
-}
-$("#img2Input").onchange = async e=>{
-    img2 = await loadImg(e.target.files[0]);
-    drawImg(img2,c2);
-}
-
 function loadImg(file){
     return new Promise(resolve=>{
         const i = new Image();
@@ -113,21 +159,31 @@ function drawImg(img,canvas){
     canvas.getContext('2d').drawImage(img,0,0);
 }
 
-$("#runBtn").onclick = ()=>{
-    if(!img1 || !img2){
-        log("❌ 请先上传两张找茬图片");
-        return;
-    }
-    runDetect();
+$("#img1Input").onchange = async e=>{
+    img1 = await loadImg(e.target.files[0]);
+    drawImg(img1,c1);
+}
+$("#img2Input").onchange = async e=>{
+    img2 = await loadImg(e.target.files[0]);
+    drawImg(img2,c2);
 }
 
-$("#reset").onclick = ()=>{
+resetBtn.onclick = ()=>{
     img1=null;img2=null;
     ctx1.clearRect(0,0,c1.width,c1.height);
     ctx2.clearRect(0,0,c2.width,c2.height);
     ctxOut.clearRect(0,0,cOut.width,cOut.height);
+    ctxMask.clearRect(0,0,cMask.width,cMask.height);
+    lastBoxes = [];
     resultText.innerText="等待运行";
     log("已重置");
+}
+downloadBtn.onclick = ()=>{
+    if(!cOut.width) { log("❌ 没有结果可以下载"); return; }
+    const link = document.createElement('a');
+    link.download = "找不同结果.png";
+    link.href = cOut.toDataURL("image/png");
+    link.click();
 }
 
 // 灰度计算
@@ -135,46 +191,101 @@ function getGray(r,g,b){
     return 0.299*r + 0.587*g + 0.114*b;
 }
 
+// 简单均值模糊
+function blurImageData(srcData,w,h,radius){
+    if(radius === 0) return srcData;
+    const dst = new Uint8ClampedArray(srcData);
+    for(let y=radius;y<h-radius;y++){
+        for(let x=radius;x<w-radius;x++){
+            let sumR=0,sumG=0,sumB=0,count=0;
+            for(let dy=-radius;dy<=radius;dy++){
+                for(let dx=-radius;dx<=radius;dx++){
+                    const idx = ((y+dy)*w + (x+dx))*4;
+                    sumR += srcData[idx];
+                    sumG += srcData[idx+1];
+                    sumB += srcData[idx+2];
+                    count++;
+                }
+            }
+            const outIdx = (y*w+x)*4;
+            dst[outIdx] = sumR/count;
+            dst[outIdx+1] = sumG/count;
+            dst[outIdx+2] = sumB/count;
+            dst[outIdx+3] = srcData[outIdx+3];
+        }
+    }
+    return new ImageData(dst,w,h);
+}
+
+runBtn.onclick = ()=>{
+    if(!img1 || !img2){
+        log("❌ 请先上传两张找茬图片");
+        return;
+    }
+    runDetect();
+}
+
 function runDetect(){
     log("🔍 开始执行找不同算法...");
     const threshVal = Number(threshSlider.value);
     const minAreaVal = Number(areaSlider.value);
+    const neighborType = Number(neighborSel.value);
+    const diffMode = diffModeSel.value;
+    const renderMode = renderModeSel.value;
+    const blurRadius = Number(blurSlider.value);
 
-    // 统一尺寸，以第一张图为准
     const w = img1.width;
     const h = img1.height;
     c2.width = w; c2.height = h;
     ctx2.drawImage(img2,0,0,w,h);
 
-    // 获取像素数据
-    const data1 = ctx1.getImageData(0,0,w,h);
-    const data2 = ctx2.getImageData(0,0,w,h);
-    const outData = ctx1.getImageData(0,0,w,h);
+    let data1 = ctx1.getImageData(0,0,w,h);
+    let data2 = ctx2.getImageData(0,0,w,h);
+    if(blurRadius>0){
+        data1 = blurImageData(data1.data,w,h,blurRadius);
+        data2 = blurImageData(data2.data,w,h,blurRadius);
+    }
 
-    // 标记差异掩码
     const mask = new Uint8Array(w*h);
     for(let y=0;y<h;y++){
         for(let x=0;x<w;x++){
             const idx = (y*w + x)*4;
-            const g1 = getGray(data1.data[idx],data1.data[idx+1],data1.data[idx+2]);
-            const g2 = getGray(data2.data[idx],data2.data[idx+1],data2.data[idx+2]);
-            const diff = Math.abs(g1-g2);
-            if(diff > threshVal){
-                mask[y*w+x] = 255;
+            let diff;
+            if(diffMode === "gray"){
+                const g1 = getGray(data1.data[idx],data1.data[idx+1],data1.data[idx+2]);
+                const g2 = getGray(data2.data[idx],data2.data[idx+1],data2.data[idx+2]);
+                diff = Math.abs(g1-g2);
             }else{
-                mask[y*w+x] = 0;
+                const r1=data1.data[idx],g1=data1.data[idx+1],b1=data1.data[idx+2];
+                const r2=data2.data[idx],g2=data2.data[idx+1],b2=data2.data[idx+2];
+                diff = Math.max(Math.abs(r1-r2),Math.abs(g1-g2),Math.abs(b1-b2));
             }
+            mask[y*w+x] = diff > threshVal ? 255 : 0;
         }
     }
 
-    // 连通域查找（8邻域）
+    // 绘制掩码预览
+    cMask.width = w; cMask.height = h;
+    const maskImgData = ctxMask.createImageData(w,h);
+    for(let i=0;i<mask.length;i++){
+        maskImgData.data[i*4] = mask[i];
+        maskImgData.data[i*4+1] = mask[i];
+        maskImgData.data[i*4+2] = mask[i];
+        maskImgData.data[i*4+3] = 255;
+    }
+    ctxMask.putImageData(maskImgData,0,0);
+
+    // 连通域 BFS
     const visited = new Uint8Array(w*h);
     const boxes = [];
+    const dirs = neighborType===8
+        ? [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]]
+        : [[-1,0],[1,0],[0,-1],[0,1]];
+
     for(let y=0;y<h;y++){
         for(let x=0;x<w;x++){
             const pos = y*w+x;
             if(mask[pos]===255 && visited[pos]===0){
-                // BFS
                 let q = [[x,y]];
                 visited[pos]=1;
                 let minX=x,maxX=x,minY=y,maxY=y,cnt=0;
@@ -185,18 +296,14 @@ function runDetect(){
                     maxX = Math.max(maxX,cx);
                     minY = Math.min(minY,cy);
                     maxY = Math.max(maxY,cy);
-                    // 8邻域
-                    for(let dy=-1;dy<=1;dy++){
-                        for(let dx=-1;dx<=1;dx++){
-                            if(dx===0&&dy===0) continue;
-                            const nx = cx+dx;
-                            const ny = cy+dy;
-                            if(nx>=0&&nx<w&&ny>=0&&ny<h){
-                                const npos = ny*w + nx;
-                                if(mask[npos]===255 && visited[npos]===0){
-                                    visited[npos]=1;
-                                    q.push([nx,ny]);
-                                }
+                    for(const [dx,dy] of dirs){
+                        const nx = cx+dx;
+                        const ny = cy+dy;
+                        if(nx>=0&&nx<w&&ny>=0&&ny<h){
+                            const npos = ny*w + nx;
+                            if(mask[npos]===255 && visited[npos]===0){
+                                visited[npos]=1;
+                                q.push([nx,ny]);
                             }
                         }
                     }
@@ -207,19 +314,30 @@ function runDetect(){
             }
         }
     }
+    lastBoxes = boxes;
 
-    // 绘制结果
-    cOut.width = w;
-    cOut.height = h;
-    ctxOut.putImageData(outData,0,0);
-    ctxOut.strokeStyle="#ff0000";
-    ctxOut.lineWidth=2;
-    boxes.forEach(box=>{
-        ctxOut.strokeRect(box.x,box.y,box.w,box.h);
-    })
+    cOut.width = w; cOut.height = h;
+    const outData = ctx1.getImageData(0,0,w,h);
+    if(renderMode === "box"){
+        ctxOut.putImageData(outData,0,0);
+        ctxOut.strokeStyle="#ff0000";
+        ctxOut.lineWidth=2;
+        boxes.forEach(box=>ctxOut.strokeRect(box.x,box.y,box.w,box.h));
+    }else if(renderMode === "mask"){
+        for(let i=0;i<mask.length;i++){
+            if(mask[i]===255){
+                outData.data[i*4] = 255;
+                outData.data[i*4+1] = 0;
+                outData.data[i*4+2] = 0;
+            }
+        }
+        ctxOut.putImageData(outData,0,0);
+    }else if(renderMode === "diff"){
+        ctxOut.putImageData(maskImgData,0,0);
+    }
 
     resultText.innerText = `一共找到 ${boxes.length} 处差异`;
-    log(`✅ 检测完成，差异数量：${boxes.length}`);
+    log(`✅ 检测完成，差异数量：${boxes.length}，邻域${neighborType}邻域`);
 }
 </script>
 </body>
