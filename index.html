@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>大家来找茬 自动检测面板</title>
+<script src="https://docs.opencv.org/4.x/opencv.js"></script>
+<style>
+*{box-sizing:border-box;font-family:"Microsoft Yahei",sans-serif;}
+body{background:#f4f7fa;padding:20px;max-width:1200px;margin:0 auto;}
+h1{text-align:center;color:#2c3e50;}
+.panel{background:#fff;border-radius:12px;padding:20px;margin-bottom:16px;box-shadow:0 2px 10px #00000015;}
+.row{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:10px 0;}
+.upload-box{flex:1;min-width:280px;}
+input[type="file"]{width:100%;padding:8px;}
+.param-item{flex:1;min-width:220px;}
+label{display:block;margin-bottom:4px;color:#34495e;font-weight:500;}
+input[type="range"]{width:100%;}
+.btns{display:flex;gap:12px;margin:16px 0;}
+button{padding:10px 24px;border:none;border-radius:8px;background:#2980b9;color:white;font-size:16px;cursor:pointer;}
+button#reset{background:#7f8c8d;}
+#log{background:#1f2937;color:#39ff14;padding:12px;border-radius:8px;min-height:80px;white-space:pre-wrap;}
+.canvas-wrap{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;}
+canvas{border:1px solid #ddd;border-radius:8px;max-width:100%;}
+.info{color:#c0392b;font-weight:bold;font-size:18px;}
+</style>
+</head>
+<body>
+<h1>大家来找茬｜自动找不同检测面板</h1>
+<div class="panel">
+    <div class="row">
+        <div class="upload-box">
+            <label>图片A（第一张）</label>
+            <input type="file" id="img1Input" accept="image/*">
+        </div>
+        <div class="upload-box">
+            <label>图片B（第二张）</label>
+            <input type="file" id="img2Input" accept="image/*">
+        </div>
+    </div>
+    <div class="row">
+        <div class="param-item">
+            <label>高斯模糊半径：<span id="blurVal">5</span></label>
+            <input type="range" id="blur" min="1" max="15" value="5" step="2">
+        </div>
+        <div class="param-item">
+            <label>差分阈值：<span id="threshVal">30</span></label>
+            <input type="range" id="thresh" min="5" max="100" value="30">
+        </div>
+        <div class="param-item">
+            <label>最小轮廓面积：<span id="areaVal">80</span></label>
+            <input type="range" id="minArea" min="10" max="400" value="80">
+        </div>
+    </div>
+    <div class="btns">
+        <button id="runBtn">开始找不同</button>
+        <button id="reset">重置</button>
+    </div>
+    <div class="info">检测结果：<span id="resultText">等待运行</span></div>
+    <div id="log">系统日志：等待加载OpenCV...</div>
+    <div class="canvas-wrap">
+        <div>
+            <p>原图A</p>
+            <canvas id="c1"></canvas>
+        </div>
+        <div>
+            <p>原图B</p>
+            <canvas id="c2"></canvas>
+        </div>
+        <div>
+            <p>标注结果图（红框=差异）</p>
+            <canvas id="cOut"></canvas>
+        </div>
+    </div>
+</div>
+
+<script>
+let cvReady = false;
+let img1 = null, img2 = null;
+let mat1, mat2;
+
+// OpenCV加载完成
+cv['onRuntimeInitialized'] = ()=>{
+    cvReady = true;
+    log("✅ OpenCV.js 加载完成，可以上传图片开始检测");
+};
+
+// DOM
+const $ = s=>document.querySelector(s);
+const logDom = $("#log");
+const resultText = $("#resultText");
+const c1 = $("#c1"), c2 = $("#c2"), cOut = $("#cOut");
+const ctx1 = c1.getContext('2d');
+const ctx2 = c2.getContext('2d');
+const ctxOut = cOut.getContext('2d');
+
+const blurSlider = $("#blur");
+const threshSlider = $("#thresh");
+const areaSlider = $("#minArea");
+$("#blurVal").innerText = blurSlider.value;
+$("#threshVal").innerText = threshSlider.value;
+$("#areaVal").innerText = areaSlider.value;
+blurSlider.oninput = ()=>$("#blurVal").innerText = blurSlider.value;
+threshSlider.oninput = ()=>$("#threshVal").innerText = threshSlider.value;
+areaSlider.oninput = ()=>$("#areaVal").innerText = areaSlider.value;
+
+function log(msg){
+    logDom.innerText = "系统日志："+msg;
+}
+
+// 读取图片
+$("#img1Input").onchange = async e=>{
+    img1 = await loadImg(e.target.files[0]);
+    drawImg(img1,c1);
+}
+$("#img2Input").onchange = async e=>{
+    img2 = await loadImg(e.target.files[0]);
+    drawImg(img2,c2);
+}
+
+function loadImg(file){
+    return new Promise(resolve=>{
+        const i = new Image();
+        i.onload = ()=>resolve(i);
+        i.src = URL.createObjectURL(file);
+    })
+}
+function drawImg(img,canvas){
+    canvas.width = img.width;
+    canvas.height = img.height;
+    canvas.getContext('2d').drawImage(img,0,0);
+}
+
+$("#runBtn").onclick = ()=>{
+    if(!cvReady){log("❌ OpenCV还没加载完，请稍等！");return;}
+    if(!img1 || !img2){log("❌ 请先上传两张找茬图片");return;}
+    runDetect();
+}
+
+$("#reset").onclick = ()=>{
+    img1=null;img2=null;
+    ctx1.clearRect(0,0,c1.width,c1.height);
+    ctx2.clearRect(0,0,c2.width,c2.height);
+    ctxOut.clearRect(0,0,cOut.width,cOut.height);
+    resultText.innerText="等待运行";
+    log("已重置");
+}
+
+function runDetect(){
+    log("🔍 开始执行找不同算法...");
+    const blurK = parseInt(blurSlider.value);
+    const threshVal = parseInt(threshSlider.value);
+    const minAreaVal = parseInt(areaSlider.value);
+
+    // 读取画布为Mat
+    mat1 = cv.imread(c1);
+    mat2 = cv.imread(c2);
+
+    // 对齐尺寸：统一缩到第一张图大小
+    const sz = new cv.Size(mat1.cols, mat1.rows);
+    cv.resize(mat2, mat2, sz);
+
+    // 灰度
+    const g1 = new cv.Mat(), g2 = new cv.Mat();
+    cv.cvtColor(mat1, g1, cv.COLOR_RGBA2GRAY);
+    cv.cvtColor(mat2, g2, cv.COLOR_RGBA2GRAY);
+
+    // 高斯模糊降噪
+    const blurKsize = new cv.Size(blurK, blurK);
+    cv.GaussianBlur(g1, g1, blurKsize, 0);
+    cv.GaussianBlur(g2, g2, blurKsize, 0);
+
+    // 差分
+    const diff = new cv.Mat();
+    cv.absdiff(g1,g2,diff);
+
+    // 二值化
+    const bin = new cv.Mat();
+    cv.threshold(diff, bin, threshVal, 255, cv.THRESH_BINARY);
+
+    // 闭运算，合并区域
+    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3,3));
+    cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kernel);
+
+    // 轮廓检测
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    // 在原图上画框
+    const outMat = mat1.clone();
+    let count = 0;
+    for(let i=0;i<contours.size();i++){
+        const cnt = contours.get(i);
+        const area = cv.contourArea(cnt);
+        if(area > minAreaVal){
+            count++;
+            const rect = cv.boundingRect(cnt);
+            const p1 = new cv.Point(rect.x, rect.y);
+            const p2 = new cv.Point(rect.x+rect.width, rect.y+rect.height);
+            cv.rectangle(outMat, p1, p2, [0,0,255,255], 2);
+        }
+    }
+
+    // 输出画布
+    cOut.width = outMat.cols;
+    cOut.height = outMat.rows;
+    cv.imshow(cOut, outMat);
+
+    resultText.innerText = `一共找到 ${count} 处差异`;
+    log(`✅ 检测完成，差异数量：${count}`);
+
+    // 释放内存，防止浏览器卡顿
+    mat1.delete();mat2.delete();g1.delete();g2.delete();diff.delete();
+    bin.delete();kernel.delete();contours.delete();hierarchy.delete();outMat.delete();
+}
+</script>
+</body>
+</html>
